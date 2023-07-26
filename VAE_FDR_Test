@@ -18,7 +18,7 @@ from sklearn.preprocessing import MinMaxScaler, StandardScaler, PowerTransformer
 import seaborn as sns
 import matplotlib.pyplot as plt
 
-%matplotlib inline
+#%matplotlib inline
 
 
 
@@ -231,14 +231,6 @@ X_pred.shape
 X_encoded = encoder.predict(X_test)
 
 
-def sample(args):
-    z_mean, z_log_var = args
-    batch = K.shape(z_mean)[0]
-    dim = K.int_shape(z_mean)[1]
-    epsilon = K.random_normal(shape=(batch, dim))
-    return z_mean + K.exp(0.5 * z_log_var) * epsilon
-
-
 
 
 
@@ -264,6 +256,10 @@ plt.show()
 
 
 
+
+
+# added False Discovery rate to test : failed. FDR are not used for hypothesis test of multivariate distribution
+(of course, we assume independency among means thus making it multiple normal dist., it does not act as test standard)
 
 
 
@@ -305,17 +301,41 @@ for p in p_val_list:
 print()
 
 
+import tensorflow_probability as tfp
+from scipy.stats import norm
+from scipy import stats
+
+tfd = tfp.distributions
 
 
 
-X_train_encoded_mean = encoder.predict(X_train)[1]
-X_train_encoded_var = np.exp(encoder.predict(X_train)[2])
-X_encoded = encoder.predict(X_test)
 
 
-def sample(args):
-    z_mean, z_log_var = args
-    batch = K.shape(z_mean)[0]
-    dim = K.int_shape(z_mean)[1]
-    epsilon = K.random_normal(shape=(batch, dim))
-    return z_mean + K.exp(0.5 * z_log_var) * epsilon
+X_train_encoded_mean = np.mean(encoder.predict(X_train)[1], axis=0)
+X_train_encoded_stddev = np.mean(np.exp(encoder.predict(X_train)[2]*0.5), axis=0)
+X_encoded = encoder.predict(X_test)[0]
+
+
+cdf_list = norm.cdf(X_encoded, X_train_encoded_mean, X_train_encoded_stddev)
+sf_list = norm.sf(X_encoded, X_train_encoded_mean, X_train_encoded_stddev)
+pvalue_list = np.sort(np.minimum(cdf_list, sf_list), axis=1)
+
+adj_pvalue_list_bh = stats.false_discovery_control(pvalue_list, axis=1)
+adj_pvalue_list_by = stats.false_discovery_control(pvalue_list, axis=1, method='by')
+
+bh_anomaly_99_90 = np.sum((adj_pvalue_list_bh < 0.01), axis=1)<4
+bh_anomaly_99_95 = np.sum((adj_pvalue_list_bh < 0.01), axis=1)<2
+
+by_anomaly_99_90 = np.sum((adj_pvalue_list_by < 0.01), axis=1)<4
+by_anomaly_99_95 = np.sum((adj_pvalue_list_by < 0.01), axis=1)<2
+
+
+len_p_val_list = pvalue_list.shape[1]
+rank_array = np.arange(1, len_p_val_list+1)
+
+adj_pvalue_list = pvalue_list*len_p_val_list/rank_array
+
+test = adj_pvalue_list<0.1
+test2 = np.sum(test, axis=1)
+test3 = test2>2
+test4 = test3.sum()
