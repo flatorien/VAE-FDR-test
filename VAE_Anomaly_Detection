@@ -18,6 +18,8 @@ from sklearn.preprocessing import MinMaxScaler, StandardScaler, PowerTransformer
 import seaborn as sns
 import matplotlib.pyplot as plt
 
+import os
+
 %matplotlib inline
 
 
@@ -28,7 +30,7 @@ urls = [
         ]
 
 
-import os
+# while original data source page is down, the data was locally downloaded from mirror source(kaggle)
 urls = [
         os.getcwd() + "\\kddcup.data_10_percent.gz",
         os.getcwd() + "\\kddcup.names"
@@ -207,14 +209,14 @@ error_thresh = np.quantile(mae_vector, 0.99)
 
 
 
-X_pred = vae_model.predict(X_test)
-mae_vector = get_error_term(X_pred, X_test, _rmse=False)
-anomalies = (mae_vector > error_thresh)
 
-np.count_nonzero(anomalies) / len(anomalies)
+X_train_pred = vae_model.predict(X_train)
+error_thresh = np.quantile(mae_vector, 0.99)
+mae_vector = get_error_term(X_train_pred, X_train, _rmse=False)
 
-
-
+X_test_pred = vae_model.predict(X_test)
+mae_vector_test = get_error_term(X_pred, X_test, _rmse=False)
+anomalies = (mae_vector_test > error_thresh)
 
 
 from sklearn.metrics import classification_report
@@ -223,43 +225,28 @@ print(classification_report(y_test, anomalies))
 
 
 
-
-X_pred.shape
-
-
+#hotelling T^2 Test
+from scipy.stats import f
 
 X_encoded = encoder.predict(X_test)
+x_encoded_pred_1 = np.array(X_encoded)[1][np.where(anomalies)]
+x_encoded_pred_0 = np.array(X_encoded)[1][np.where(~anomalies)]
 
+def TwoSampleT2Test(X, Y):
+    nx, p = X.shape
+    ny, _ = Y.shape
+    delta = np.mean(X, axis=0) - np.mean(Y, axis=0)
+    Sx = np.cov(X, rowvar=False)
+    Sy = np.cov(Y, rowvar=False)
+    S_pooled = ((nx-1)*Sx + (ny-1)*Sy)/(nx+ny-2)
+    t_squared = (nx*ny)/(nx+ny) * np.matmul(np.matmul(delta.transpose(), np.linalg.inv(S_pooled)), delta)
+    statistic = t_squared * (nx+ny-p-1)/(p*(nx+ny-2))
+    F = f(p, nx+ny-p-1)
+    p_value = 1 - F.cdf(statistic)
+    print(f"Test statistic: {statistic}\nDegrees of freedom: {p} and {nx+ny-p-1}\np-value: {p_value}")
+    return statistic, p_value
 
-def sample(args):
-    z_mean, z_log_var = args
-    batch = K.shape(z_mean)[0]
-    dim = K.int_shape(z_mean)[1]
-    epsilon = K.random_normal(shape=(batch, dim))
-    return z_mean + K.exp(0.5 * z_log_var) * epsilon
+TwoSampleT2Test(x_encoded_pred_1, x_encoded_pred_0)
 
-
-
-
-
-
-from sklearn.decomposition import PCA
-
-pca = PCA(n_components=2)
-X_transform = pca.fit_transform(X_encoded)
-
-
-
-plt.figure(figsize=(12, 10))
-sns.scatterplot(x=X_transform[:, 0], y=X_transform[:, 1], s=20, hue=mae_vector)
-plt.grid()
-plt.show()
-
-
-
-plt.figure(figsize=(12, 10))
-sns.scatterplot(x=X_transform[:, 0], y=X_transform[:, 1], s=20, hue=anomalies)
-plt.grid()
-plt.show()
 
 
