@@ -1,0 +1,278 @@
+from datetime import datetime
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+
+
+import tensorflow as tf
+tf.compat.v1.disable_eager_execution()
+from tensorflow.keras.models import Model, load_model
+from tensorflow.keras.layers import Lambda, Input, Dense
+from tensorflow.keras.losses import mse, binary_crossentropy, kl_divergence
+from tensorflow.keras import optimizers
+from tensorflow.keras import backend as K
+
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import MinMaxScaler, StandardScaler, PowerTransformer
+
+import seaborn as sns
+import matplotlib.pyplot as plt
+
+import os
+import copy
+
+
+
+
+urls = [
+        "http://kdd.ics.uci.edu/databases/kddcup99/kddcup.data_10_percent.gz",
+        "http://kdd.ics.uci.edu/databases/kddcup99/kddcup.names"
+        ]
+
+
+# while original data source page is down, the data was locally downloaded from mirror source(kaggle)
+urls = [
+        os.getcwd() + "\\kddcup.data_10_percent.gz",
+        os.getcwd() + "\\kddcup.names"
+        ]
+
+
+
+# this pre-processing code of the KDD dataset is adapter from https://github.com/lironber/GOAD/blob/master/data_loader.py
+
+df_colnames = pd.read_csv(urls[1], skiprows=1, sep=':', names=['f_names', 'f_types'])
+df_colnames.loc[df_colnames.shape[0]] = ['status', ' symbolic.']
+
+df = pd.read_csv(urls[0], header=None, names=df_colnames['f_names'].values)
+df_symbolic = df_colnames[df_colnames['f_types'].str.contains('symbolic.')]
+df_continuous = df_colnames[df_colnames['f_types'].str.contains('continuous.')]
+
+df_i = copy.deepcopy(df)
+df_i['t'] = 1
+continuous_columns = df.columns.isin(df_continuous['f_names'].to_list()).astype(int)
+
+for i in range(2,11,1):
+    df_t = copy.deepcopy(df_i)
+    df_t[df_continuous['f_names'].to_list()] = df_t[df_continuous['f_names'].to_list()] * i
+    df_t['t'] = i
+    df = pd.concat([df, df_t], axis=0)
+
+df = df.sample(frac=1, random_state=10)
+
+samples = pd.get_dummies(df.drop(columns='status'), columns=df_symbolic['f_names'][:-1])
+
+#samples = pd.get_dummies(df.iloc[:, :-1], columns=df_symbolic['f_names'][:-1]) #original code
+
+labels = np.where(df['status'] == 'normal.', 1, 0)
+
+
+
+
+scaler = MinMaxScaler()
+df_scaled = scaler.fit_transform(samples)
+
+
+
+norm_samples = df_scaled[labels == 1]  # normal data
+attack_samples = df_scaled[labels == 0]  # attack data
+
+norm_labels = labels[labels == 1]
+attack_labels = labels[labels == 0]
+
+
+
+attack_samples.shape
+
+
+
+# generate train set
+# training set will consist of the normal ds
+
+len_norm = len(norm_samples)
+len_norm_train = int(0.8 * len_norm)
+X_train = norm_samples[:len_norm_train]
+
+# generate test set consist of 50% attack and 50% normal
+
+X_test_norm = norm_samples[len_norm_train:]
+len_attack_test = len(X_test_norm) # we will use the same number
+X_test_attack = attack_samples[:len_attack_test]
+
+X_test = np.concatenate([X_test_norm, X_test_attack])
+y_test = np.ones(len(X_test))
+y_test[:len(X_test_norm)] = 0
+
+
+# add time column and modify its effects: all continuous variables will add itself times i
+
+X_train_i = copy.deepcopy(X_train)
+X_test_i = copy.deepcopy(X_test)
+y_test_t = copy.deepcopy(y_test)
+continuous_columns = df.columns.isin(df_continuous['f_names'].to_list()).astype(int)
+for i in range(1,11,1):
+    X_train_t = X_train_i*(1+i*continuous_columns)
+    X_test_t = X_test_i*(1+i*continuous_columns)
+    X_train = np.append(X_train, X_train_t, axis=0)
+    X_test = np.append(X_test, X_test_t, axis=0)
+    y_test = np.append(y_test, y_test_t, axis=0)
+
+
+
+X_train.shape
+
+X_test.shape
+
+
+
+def get_error_term(v1, v2, _rmse=True):
+    if _rmse:
+        return np.sqrt(np.mean((v1 - v2) ** 2, axis=1))
+    #return MAE
+    return np.mean(abs(v1 - v2), axis=1)
+
+
+
+
+# The reparameterization trick
+
+def sample(args):
+    z_mean, z_log_var = args
+    batch = K.shape(z_mean)[0]
+    dim = K.int_shape(z_mean)[1]
+    epsilon = K.random_normal(shape=(batch, dim))
+    return z_mean + K.exp(0.5 * z_log_var) * epsilon
+
+
+
+
+
+original_dim = X_train.shape[1]
+input_shape = (original_dim,)
+intermediate_dim = int(original_dim / 2)
+latent_dim = int(original_dim / 3)
+
+
+
+
+# encoder model
+inputs = Input(shape=input_shape, name='encoder_input')
+x = Dense(intermediate_dim, activation='relu')(inputs)
+z_mean = Dense(latent_dim, name='z_mean')(x)
+z_log_var = Dense(latent_dim, name='z_log_var')(x)
+# use the reparameterization trick and get the output from the sample() function
+z = Lambda(sample, output_shape=(latent_dim,), name='z')([z_mean, z_log_var])
+encoder = Model(inputs, outputs = [z, z_mean, z_log_var], name='encoder')
+encoder.summary()
+
+
+
+
+# decoder model
+latent_inputs = Input(shape=(latent_dim,), name='z_sampling')
+x = Dense(intermediate_dim, activation='relu')(latent_inputs)
+outputs = Dense(original_dim, activation='sigmoid')(x)
+# Instantiate the decoder model:
+decoder = Model(latent_inputs, outputs, name='decoder')
+decoder.summary()
+
+
+
+
+
+# full VAE model
+outputs = decoder(encoder(inputs)[0])
+vae_model = Model(inputs, outputs, name='vae_mlp')
+
+
+
+# the KL loss function:
+def vae_loss(x, x_decoded_mean):
+    # compute the average MSE error, then scale it up, ie. simply sum on all axes
+    reconstruction_loss = K.sum(K.square(x - x_decoded_mean))
+    # compute the KL loss
+    kl_loss = - 0.5 * K.sum(1 + z_log_var - K.square(z_mean) - K.square(K.exp(z_log_var)), axis=-1)
+    # return the average loss over all
+    total_loss = K.mean(reconstruction_loss + kl_loss)
+    #total_loss = reconstruction_loss + kl_loss
+    return total_loss
+
+
+
+opt = optimizers.Adam(learning_rate=0.0001, clipvalue=0.5)
+#opt = optimizers.RMSprop(learning_rate=0.0001)
+
+vae_model.compile(optimizer=opt, loss=vae_loss)
+vae_model.summary()
+# Finally, we train the model:
+results = vae_model.fit(X_train, X_train,
+                        shuffle=True,
+                        epochs=32,
+                        batch_size=256)
+
+
+
+plt.plot(results.history['loss'])
+#plt.plot(results.history['val_loss'])
+plt.title('model loss')
+plt.ylabel('loss')
+plt.xlabel('epoch')
+plt.legend(['train', 'test'], loc='upper right');
+plt.show()
+
+
+
+
+
+X_train_pred = vae_model.predict(X_train)
+
+
+
+
+mae_vector = get_error_term(X_train_pred, X_train, _rmse=False)
+print(f'Avg error {np.mean(mae_vector)}\nmedian error {np.median(mae_vector)}\n99Q: {np.quantile(mae_vector, 0.99)}')
+print(f'setting threshold on { np.quantile(mae_vector, 0.99)} ')
+
+error_thresh = np.quantile(mae_vector, 0.99)
+
+
+
+
+X_train_pred = vae_model.predict(X_train)
+error_thresh = np.quantile(mae_vector, 0.99)
+mae_vector = get_error_term(X_train_pred, X_train, _rmse=False)
+
+X_test_pred = vae_model.predict(X_test)
+mae_vector_test = get_error_term(X_pred, X_test, _rmse=False)
+anomalies = (mae_vector_test > error_thresh)
+
+
+from sklearn.metrics import classification_report
+
+print(classification_report(y_test, anomalies))
+
+
+
+#hotelling T^2 Test
+from scipy.stats import f
+
+X_encoded = encoder.predict(X_test)
+x_encoded_pred_1 = np.array(X_encoded)[1][np.where(anomalies)]
+x_encoded_pred_0 = np.array(X_encoded)[1][np.where(~anomalies)]
+
+def TwoSampleT2Test(X, Y):
+    nx, p = X.shape
+    ny, _ = Y.shape
+    delta = np.mean(X, axis=0) - np.mean(Y, axis=0)
+    Sx = np.cov(X, rowvar=False)
+    Sy = np.cov(Y, rowvar=False)
+    S_pooled = ((nx-1)*Sx + (ny-1)*Sy)/(nx+ny-2)
+    t_squared = (nx*ny)/(nx+ny) * np.matmul(np.matmul(delta.transpose(), np.linalg.inv(S_pooled)), delta)
+    statistic = t_squared * (nx+ny-p-1)/(p*(nx+ny-2))
+    F = f(p, nx+ny-p-1)
+    p_value = 1 - F.cdf(statistic)
+    print(f"Test statistic: {statistic}\nDegrees of freedom: {p} and {nx+ny-p-1}\np-value: {p_value}")
+    return statistic, p_value
+
+TwoSampleT2Test(x_encoded_pred_1, x_encoded_pred_0)
+
+
